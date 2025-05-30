@@ -35,13 +35,15 @@ class DoctlyClient:
             self._api_key_validated = True
             logger.info("Doctly API key validated")
     
-    def upload_pdf(self, pdf_path: str, accuracy: str = "ultra") -> str:
+    def upload_pdf(self, pdf_path: str, accuracy: str = None) -> str:
         """
         Upload a PDF file to Doctly for processing
         
         Args:
             pdf_path: Local path to the PDF file
-            accuracy: Processing accuracy level ("ultra", "lite")
+            accuracy: Processing accuracy level ("ultra", "lite"). If None, automatically determined by file size:
+                     - Files < 500KB use "lite" 
+                     - Files >= 500KB use "ultra"
             
         Returns:
             Document ID for tracking the conversion process
@@ -57,7 +59,19 @@ class DoctlyClient:
                 raise Exception(f"PDF file not found: {pdf_path}")
             
             file_size = os.path.getsize(pdf_path)
-            logger.info(f"Uploading PDF to Doctly: {pdf_path} ({file_size} bytes)")
+            
+            # Auto-determine accuracy based on file size if not specified
+            if accuracy is None:
+                if file_size < 500 * 1024:  # 500KB threshold
+                    accuracy = "lite"
+                    logger.info(f"File size {file_size} bytes (< 500KB), using 'lite' accuracy")
+                else:
+                    accuracy = "ultra"
+                    logger.info(f"File size {file_size} bytes (>= 500KB), using 'ultra' accuracy")
+            else:
+                logger.info(f"Using specified accuracy: {accuracy}")
+            
+            logger.info(f"Uploading PDF to Doctly: {pdf_path} ({file_size} bytes) with {accuracy} accuracy")
             
             # Prepare multipart form data according to Doctly API docs
             with open(pdf_path, 'rb') as pdf_file:
@@ -274,14 +288,16 @@ class DoctlyClient:
             logger.error(f"Failed to cancel Doctly job {job_id}: {str(e)}")
             return False
 
-    def process_pdf_direct(self, pdf_path: str, accuracy: str = "ultra") -> tuple[str, str]:
+    def process_pdf_direct(self, pdf_path: str, accuracy: str = None) -> tuple[str, str]:
         """
         Process a PDF file and return the markdown content and document ID
         This method handles the complete workflow: upload, poll, and download
         
         Args:
             pdf_path: Local path to the PDF file
-            accuracy: Processing accuracy level ("ultra", "lite")
+            accuracy: Processing accuracy level ("ultra", "lite"). If None, automatically determined by file size:
+                     - Files < 500KB use "lite" 
+                     - Files >= 500KB use "ultra"
             
         Returns:
             Tuple of (markdown_content, document_id)
@@ -297,7 +313,19 @@ class DoctlyClient:
                 raise Exception(f"PDF file not found: {pdf_path}")
             
             file_size = os.path.getsize(pdf_path)
-            logger.info(f"Processing PDF with Doctly: {pdf_path} ({file_size} bytes)")
+            
+            # Auto-determine accuracy based on file size if not specified
+            if accuracy is None:
+                if file_size < 500 * 1024:  # 500KB threshold
+                    accuracy = "lite"
+                    logger.info(f"File size {file_size} bytes (< 500KB), using 'lite' accuracy")
+                else:
+                    accuracy = "ultra"
+                    logger.info(f"File size {file_size} bytes (>= 500KB), using 'ultra' accuracy")
+            else:
+                logger.info(f"Using specified accuracy: {accuracy}")
+            
+            logger.info(f"Processing PDF with Doctly: {pdf_path} ({file_size} bytes) with {accuracy} accuracy")
             
             # Prepare multipart form data according to Doctly API docs
             with open(pdf_path, 'rb') as pdf_file:
