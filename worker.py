@@ -72,6 +72,7 @@ class Worker:
         logger.info(f"Processing job {job['id']}: {s3_key}")
         
         temp_files = []
+        document_id = None
         
         try:
             # Step 1: Download PDF from S3
@@ -81,8 +82,8 @@ class Worker:
                 logger.info(f"Downloaded PDF from S3: {s3_key}")
             
             # Step 2: Send to Doctly for conversion
-            markdown_content = self.doctly_client.process_pdf_direct(temp_pdf.name)
-            logger.info(f"Doctly processing completed")
+            markdown_content, document_id = self.doctly_client.process_pdf_direct(temp_pdf.name)
+            logger.info(f"Doctly processing completed, document ID: {document_id}")
             
             # Step 3: Parse Markdown to CSV
             csv_content = self.table_parser.markdown_to_csv(markdown_content)
@@ -100,11 +101,13 @@ class Worker:
                 csv_url = self.s3_utils.upload_file(temp_csv.name, s3_bucket, csv_key)
                 logger.info(f"Uploaded CSV to S3: {csv_key}")
             
-            # Step 5: Send success webhook
-            self._send_webhook(webhook_url, {
+            # Step 5: Send success webhook with document_id appended to URL
+            webhook_url_with_id = f"{webhook_url}?document_id={document_id}"
+            self._send_webhook(webhook_url_with_id, {
                 "status": "success",
                 "csv_url": csv_url,
-                "original_filename": os.path.basename(s3_key)
+                "original_filename": os.path.basename(s3_key),
+                "document_id": document_id
             })
             
             logger.info(f"Job {job['id']} completed successfully")
@@ -112,11 +115,13 @@ class Worker:
         except Exception as e:
             logger.error(f"Job {job['id']} failed: {str(e)}")
             
-            # Send error webhook
-            self._send_webhook(webhook_url, {
+            # Send error webhook with document_id if available
+            webhook_url_with_id = f"{webhook_url}?document_id={document_id}" if document_id else webhook_url
+            self._send_webhook(webhook_url_with_id, {
                 "status": "error",
                 "message": str(e),
-                "original_filename": os.path.basename(s3_key)
+                "original_filename": os.path.basename(s3_key),
+                "document_id": document_id
             })
             
         finally:

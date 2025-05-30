@@ -274,9 +274,9 @@ class DoctlyClient:
             logger.error(f"Failed to cancel Doctly job {job_id}: {str(e)}")
             return False
 
-    def process_pdf_direct(self, pdf_path: str, accuracy: str = "ultra") -> str:
+    def process_pdf_direct(self, pdf_path: str, accuracy: str = "ultra") -> tuple[str, str]:
         """
-        Process a PDF file and return the markdown content directly
+        Process a PDF file and return the markdown content and document ID
         This method handles the complete workflow: upload, poll, and download
         
         Args:
@@ -284,7 +284,7 @@ class DoctlyClient:
             accuracy: Processing accuracy level ("ultra", "lite")
             
         Returns:
-            Markdown content as string
+            Tuple of (markdown_content, document_id)
             
         Raises:
             Exception: If processing fails
@@ -330,8 +330,9 @@ class DoctlyClient:
                     status = document.get('status', 'UNKNOWN')
                     logger.info(f"Document uploaded with ID {document_id}, status: {status}")
                     
-                    # Poll until completion and return result
-                    return self.poll_until_complete(document_id)
+                    # Poll until completion and return both result and document_id
+                    markdown_content = self.poll_until_complete(document_id)
+                    return markdown_content, document_id
                 else:
                     logger.error(f"Unexpected response format from Doctly: {result}")
                     raise Exception("Invalid response format from Doctly API")
