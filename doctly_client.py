@@ -41,10 +41,10 @@ class DoctlyClient:
         
         Args:
             pdf_path: Local path to the PDF file
-            accuracy: Processing accuracy level ("ultra", "high", "medium")
+            accuracy: Processing accuracy level ("ultra", "lite")
             
         Returns:
-            Job ID for tracking the conversion process
+            Document ID for tracking the conversion process
             
         Raises:
             Exception: If upload fails
@@ -69,7 +69,7 @@ class DoctlyClient:
                     data['accuracy'] = accuracy
                 
                 response = requests.post(
-                    f"{self.base_url}/documents/",  # Fixed: Updated endpoint path
+                    f"{self.base_url}/documents/",
                     headers=self.headers,
                     files=files,
                     data=data,
@@ -79,15 +79,20 @@ class DoctlyClient:
                 response.raise_for_status()
                 result = response.json()
                 
-                # The API might return different response structure
-                # We'll need to adapt based on actual response
-                job_id = result.get('id') or result.get('job_id') or result.get('document_id')
-                if not job_id:
-                    logger.error(f"Unexpected response from Doctly: {result}")
-                    raise Exception("No job/document ID returned from Doctly API")
-                
-                logger.info(f"PDF uploaded successfully, job ID: {job_id}")
-                return job_id
+                # According to docs, response is an array of document objects
+                if isinstance(result, list) and len(result) > 0:
+                    document = result[0]  # Get first document
+                    document_id = document.get('id')
+                    if not document_id:
+                        logger.error(f"No ID in document object: {document}")
+                        raise Exception("No document ID returned from Doctly API")
+                    
+                    logger.info(f"PDF uploaded successfully, document ID: {document_id}")
+                    logger.info(f"Document status: {document.get('status', 'UNKNOWN')}")
+                    return document_id
+                else:
+                    logger.error(f"Unexpected response format from Doctly: {result}")
+                    raise Exception("Invalid response format from Doctly API")
                 
         except requests.exceptions.RequestException as e:
             logger.error(f"HTTP error uploading to Doctly: {str(e)}")
@@ -96,15 +101,15 @@ class DoctlyClient:
             logger.error(f"Error uploading PDF to Doctly: {str(e)}")
             raise
     
-    def get_job_status(self, job_id: str) -> dict:
+    def get_document_status(self, document_id: str) -> dict:
         """
-        Get the status of a Doctly conversion job
+        Get the status of a Doctly document
         
         Args:
-            job_id: Job ID returned from upload_pdf
+            document_id: Document ID returned from upload_pdf
             
         Returns:
-            Dictionary containing job status information
+            Dictionary containing document status information
             
         Raises:
             Exception: If status check fails
@@ -113,7 +118,7 @@ class DoctlyClient:
         
         try:
             response = requests.get(
-                f"{self.base_url}/documents/{job_id}",  # Fixed: Updated endpoint path
+                f"{self.base_url}/documents/{document_id}",
                 headers=self.headers,
                 timeout=30
             )
@@ -122,18 +127,23 @@ class DoctlyClient:
             return response.json()
             
         except requests.exceptions.RequestException as e:
-            logger.error(f"HTTP error checking Doctly job status: {str(e)}")
+            logger.error(f"HTTP error checking Doctly document status: {str(e)}")
             raise Exception(f"Doctly status check failed: {str(e)}")
         except Exception as e:
-            logger.error(f"Error checking Doctly job status: {str(e)}")
+            logger.error(f"Error checking Doctly document status: {str(e)}")
             raise
+
+    # Keep the old method name for backward compatibility
+    def get_job_status(self, job_id: str) -> dict:
+        """Backward compatibility wrapper for get_document_status"""
+        return self.get_document_status(job_id)
     
-    def download_result(self, job_id: str) -> str:
+    def download_result(self, document_id: str) -> str:
         """
         Download the converted Markdown content from Doctly
         
         Args:
-            job_id: Job ID of the completed conversion
+            document_id: Document ID of the completed conversion
             
         Returns:
             Markdown content as string
@@ -144,19 +154,25 @@ class DoctlyClient:
         self._validate_api_key()  # Validate API key before use
         
         try:
+            # First get the document status to get the download URL
+            document_info = self.get_document_status(document_id)
+            
+            output_file_url = document_info.get('output_file_url')
+            if not output_file_url:
+                status = document_info.get('status', 'UNKNOWN')
+                if status != 'COMPLETED':
+                    raise Exception(f"Document not ready for download. Status: {status}")
+                else:
+                    raise Exception("No output_file_url available in completed document")
+            
+            # Download from the provided URL
             response = requests.get(
-                f"{self.base_url}/documents/{job_id}/download",  # Fixed: Updated endpoint path
+                output_file_url,
                 headers=self.headers,
                 timeout=60
             )
             
             response.raise_for_status()
-            
-            # Check if response is JSON (error) or text (markdown content)
-            content_type = response.headers.get('content-type', '')
-            if 'application/json' in content_type:
-                error_data = response.json()
-                raise Exception(f"Doctly download error: {error_data.get('message', 'Unknown error')}")
             
             markdown_content = response.text
             if not markdown_content.strip():
@@ -172,12 +188,12 @@ class DoctlyClient:
             logger.error(f"Error downloading Doctly result: {str(e)}")
             raise
     
-    def poll_until_complete(self, job_id: str, max_wait_time: int = 1800, poll_interval: int = 10) -> str:
+    def poll_until_complete(self, document_id: str, max_wait_time: int = 1800, poll_interval: int = 10) -> str:
         """
-        Poll Doctly job status until completion and return the result
+        Poll Doctly document status until completion and return the result
         
         Args:
-            job_id: Job ID to poll
+            document_id: Document ID to poll
             max_wait_time: Maximum time to wait in seconds (default: 30 minutes)
             poll_interval: Time between polls in seconds (default: 10 seconds)
             
@@ -185,43 +201,45 @@ class DoctlyClient:
             Markdown content as string
             
         Raises:
-            Exception: If job fails or times out
+            Exception: If document processing fails or times out
         """
         start_time = time.time()
-        logger.info(f"Starting to poll Doctly job {job_id}")
+        logger.info(f"Starting to poll Doctly document {document_id}")
         
         while time.time() - start_time < max_wait_time:
             try:
-                status_data = self.get_job_status(job_id)
+                status_data = self.get_document_status(document_id)
                 status = status_data.get('status', '').upper()
                 
-                logger.debug(f"Job {job_id} status: {status}")
+                logger.debug(f"Document {document_id} status: {status}")
                 
                 if status == 'COMPLETED':
-                    logger.info(f"Job {job_id} completed successfully")
-                    return self.download_result(job_id)
-                elif status in ['FAILED', 'ERROR']:
-                    error_message = status_data.get('error_message', 'Unknown error')
-                    raise Exception(f"Doctly job failed: {error_message}")
-                elif status in ['QUEUED', 'PROCESSING', 'IN_PROGRESS']:
-                    # Job is still processing, continue polling
+                    logger.info(f"Document {document_id} completed successfully")
+                    return self.download_result(document_id)
+                elif status in ['FAILED', 'EXPIRED']:
+                    error_message = f"Document processing {status.lower()}"
+                    logger.error(f"Document {document_id} {error_message}")
+                    raise Exception(f"Doctly document {error_message}")
+                elif status in ['PENDING', 'PROCESSING']:
+                    # Document is still processing, continue polling
+                    logger.debug(f"Document {document_id} still {status.lower()}, waiting...")
                     time.sleep(poll_interval)
                 else:
-                    logger.warning(f"Unknown job status: {status}")
+                    logger.warning(f"Unknown document status: {status}")
                     time.sleep(poll_interval)
                     
             except Exception as e:
-                if "job failed" in str(e).lower():
-                    # Job actually failed, don't retry
+                if any(word in str(e).lower() for word in ["failed", "expired"]):
+                    # Document actually failed, don't retry
                     raise
                 else:
                     # Network or other temporary error, log and continue
-                    logger.warning(f"Error polling job status: {str(e)}")
+                    logger.warning(f"Error polling document status: {str(e)}")
                     time.sleep(poll_interval)
         
         # Timeout reached
         elapsed_time = time.time() - start_time
-        raise Exception(f"Doctly job {job_id} timed out after {elapsed_time:.1f} seconds")
+        raise Exception(f"Doctly document {document_id} timed out after {elapsed_time:.1f} seconds")
     
     def cancel_job(self, job_id: str) -> bool:
         """
@@ -253,11 +271,11 @@ class DoctlyClient:
     def process_pdf_direct(self, pdf_path: str, accuracy: str = "ultra") -> str:
         """
         Process a PDF file and return the markdown content directly
-        This method handles the case where Doctly returns the result immediately
+        This method handles the complete workflow: upload, poll, and download
         
         Args:
             pdf_path: Local path to the PDF file
-            accuracy: Processing accuracy level ("ultra", "high", "medium")
+            accuracy: Processing accuracy level ("ultra", "lite")
             
         Returns:
             Markdown content as string
@@ -293,27 +311,24 @@ class DoctlyClient:
                 )
                 
                 response.raise_for_status()
+                result = response.json()
                 
-                # Check if response is JSON (with job ID) or direct markdown
-                content_type = response.headers.get('content-type', '')
-                if 'application/json' in content_type:
-                    # Response contains job information, need to poll
-                    result = response.json()
-                    job_id = result.get('id') or result.get('job_id') or result.get('document_id')
-                    if job_id:
-                        logger.info(f"Got job ID {job_id}, polling for completion...")
-                        return self.poll_until_complete(job_id)
-                    else:
-                        logger.error(f"Unexpected JSON response from Doctly: {result}")
-                        raise Exception("No job ID returned from Doctly API")
-                else:
-                    # Direct markdown response
-                    markdown_content = response.text
-                    if not markdown_content.strip():
-                        raise Exception("Received empty markdown content from Doctly")
+                # According to docs, response is always an array of document objects
+                if isinstance(result, list) and len(result) > 0:
+                    document = result[0]  # Get first document
+                    document_id = document.get('id')
+                    if not document_id:
+                        logger.error(f"No ID in document object: {document}")
+                        raise Exception("No document ID returned from Doctly API")
                     
-                    logger.info(f"Received direct markdown content ({len(markdown_content)} characters)")
-                    return markdown_content
+                    status = document.get('status', 'UNKNOWN')
+                    logger.info(f"Document uploaded with ID {document_id}, status: {status}")
+                    
+                    # Poll until completion and return result
+                    return self.poll_until_complete(document_id)
+                else:
+                    logger.error(f"Unexpected response format from Doctly: {result}")
+                    raise Exception("Invalid response format from Doctly API")
                 
         except requests.exceptions.RequestException as e:
             logger.error(f"HTTP error processing PDF with Doctly: {str(e)}")
