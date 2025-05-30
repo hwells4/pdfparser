@@ -5,8 +5,10 @@ FastAPI application with /parse endpoint for PDF to CSV conversion via Doctly
 
 import os
 import logging
+import time
 from typing import Dict, Any
-from fastapi import FastAPI, HTTPException
+from collections import defaultdict
+from fastapi import FastAPI, HTTPException, Header, Depends, Request
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -33,6 +35,78 @@ job_queue = JobQueue()
 # Start background worker
 start_background_worker(job_queue)
 
+# Simple rate limiting for failed auth attempts
+failed_attempts = defaultdict(list)
+MAX_FAILED_ATTEMPTS = 5
+LOCKOUT_DURATION = 300  # 5 minutes
+
+
+def is_ip_locked(ip: str) -> bool:
+    """Check if IP is temporarily locked due to too many failed attempts"""
+    now = time.time()
+    # Clean old attempts
+    failed_attempts[ip] = [attempt for attempt in failed_attempts[ip] 
+                          if now - attempt < LOCKOUT_DURATION]
+    
+    return len(failed_attempts[ip]) >= MAX_FAILED_ATTEMPTS
+
+
+def record_failed_attempt(ip: str):
+    """Record a failed authentication attempt"""
+    failed_attempts[ip].append(time.time())
+
+
+def verify_api_key(request: Request, x_api_key: str = Header(..., alias="X-API-Key")):
+    """
+    Verify API key from request header
+    
+    Args:
+        request: FastAPI request object
+        x_api_key: API key from X-API-Key header
+        
+    Raises:
+        HTTPException: If API key is invalid or missing
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    
+    # Check if IP is temporarily locked
+    if is_ip_locked(client_ip):
+        logger.warning(f"Blocked request from locked IP: {client_ip}")
+        raise HTTPException(
+            status_code=429,
+            detail="Too many failed attempts. Please try again later."
+        )
+    
+    expected_api_key = os.getenv("API_KEY")
+    if not expected_api_key:
+        logger.error("API_KEY environment variable not set")
+        raise HTTPException(
+            status_code=500,
+            detail="Server configuration error"
+        )
+    
+    # Handle empty or whitespace-only keys
+    if not x_api_key or not x_api_key.strip():
+        logger.warning(f"Empty or whitespace API key provided from IP: {client_ip}")
+        record_failed_attempt(client_ip)
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid API key"
+        )
+    
+    if x_api_key != expected_api_key:
+        # Log more details for debugging (but keep key secure)
+        logger.warning(f"Invalid API key attempt from IP {client_ip}: {x_api_key[:8]}... (length: {len(x_api_key)})")
+        record_failed_attempt(client_ip)
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid API key"
+        )
+    
+    # Log successful authentication (but don't log the actual key)
+    logger.debug(f"API key authentication successful from IP: {client_ip}")
+    return x_api_key
+
 
 class ParseRequest(BaseModel):
     s3_bucket: str
@@ -46,12 +120,13 @@ class ParseResponse(BaseModel):
 
 
 @app.post("/parse", response_model=ParseResponse)
-async def parse_pdf(request: ParseRequest) -> ParseResponse:
+async def parse_pdf(request: ParseRequest, api_key: str = Depends(verify_api_key)) -> ParseResponse:
     """
     Main endpoint to initiate PDF parsing job
     
     Args:
         request: ParseRequest containing S3 bucket, key, and webhook URL
+        api_key: Verified API key from X-API-Key header
         
     Returns:
         ParseResponse with job status and queue position
