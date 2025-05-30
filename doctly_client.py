@@ -165,10 +165,11 @@ class DoctlyClient:
                 else:
                     raise Exception("No output_file_url available in completed document")
             
-            # Download from the provided URL
+            logger.info(f"Downloading from URL: {output_file_url}")
+            
+            # Download from the provided S3 signed URL (don't include auth headers for S3)
             response = requests.get(
                 output_file_url,
-                headers=self.headers,
                 timeout=60
             )
             
@@ -183,6 +184,11 @@ class DoctlyClient:
             
         except requests.exceptions.RequestException as e:
             logger.error(f"HTTP error downloading from Doctly: {str(e)}")
+            # Log the full response for debugging
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Response status: {e.response.status_code}")
+                logger.error(f"Response headers: {dict(e.response.headers)}")
+                logger.error(f"Response content: {e.response.text[:500]}...")
             raise Exception(f"Doctly download failed: {str(e)}")
         except Exception as e:
             logger.error(f"Error downloading Doctly result: {str(e)}")
@@ -215,7 +221,7 @@ class DoctlyClient:
                 
                 if status == 'COMPLETED':
                     logger.info(f"Document {document_id} completed successfully")
-                    return self.download_result(document_id)
+                    return self.download_result_with_fallback(document_id)
                 elif status in ['FAILED', 'EXPIRED']:
                     error_message = f"Document processing {status.lower()}"
                     logger.error(f"Document {document_id} {error_message}")
@@ -335,4 +341,45 @@ class DoctlyClient:
             raise Exception(f"Doctly processing failed: {str(e)}")
         except Exception as e:
             logger.error(f"Error processing PDF with Doctly: {str(e)}")
-            raise 
+            raise
+
+    def download_result_with_fallback(self, document_id: str) -> str:
+        """
+        Download result with multiple fallback strategies
+        
+        Args:
+            document_id: Document ID of the completed conversion
+            
+        Returns:
+            Markdown content as string
+        """
+        try:
+            # Try the standard download method first
+            return self.download_result(document_id)
+        except Exception as e:
+            logger.warning(f"Standard download failed: {str(e)}")
+            
+            # Fallback: Try downloading with different headers
+            try:
+                document_info = self.get_document_status(document_id)
+                output_file_url = document_info.get('output_file_url')
+                
+                if output_file_url:
+                    logger.info("Trying fallback download with User-Agent header")
+                    response = requests.get(
+                        output_file_url,
+                        headers={'User-Agent': 'Mozilla/5.0 (compatible; PDF-Parser/1.0)'},
+                        timeout=60
+                    )
+                    response.raise_for_status()
+                    
+                    markdown_content = response.text
+                    if markdown_content.strip():
+                        logger.info(f"Fallback download successful ({len(markdown_content)} characters)")
+                        return markdown_content
+                        
+            except Exception as fallback_error:
+                logger.error(f"Fallback download also failed: {str(fallback_error)}")
+            
+            # If all else fails, re-raise the original error
+            raise e 
