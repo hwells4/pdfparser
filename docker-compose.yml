@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  pdf-parser:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Required: Set these in your .env file or environment
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - DOCTLY_API_KEY=${DOCTLY_API_KEY}
+      
+      # Optional: Override defaults if needed
+      - PORT=8000
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      
+    volumes:
+      # Optional: Mount a volume for temporary files if needed
+      - pdf_temp:/tmp/pdf-parser
+      
+    restart: unless-stopped
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+      
+    # Resource limits for production
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+
+volumes:
+  pdf_temp: 
