@@ -81,18 +81,14 @@ class Worker:
                 logger.info(f"Downloaded PDF from S3: {s3_key}")
             
             # Step 2: Send to Doctly for conversion
-            doctly_job_id = self.doctly_client.upload_pdf(temp_pdf.name)
-            logger.info(f"Uploaded to Doctly, job ID: {doctly_job_id}")
+            markdown_content = self.doctly_client.process_pdf_direct(temp_pdf.name)
+            logger.info(f"Doctly processing completed")
             
-            # Step 3: Poll Doctly until completion
-            markdown_content = self.doctly_client.poll_until_complete(doctly_job_id)
-            logger.info(f"Doctly processing completed for job {doctly_job_id}")
-            
-            # Step 4: Parse Markdown to CSV
+            # Step 3: Parse Markdown to CSV
             csv_content = self.table_parser.markdown_to_csv(markdown_content)
             logger.info("Converted Markdown to CSV")
             
-            # Step 5: Upload CSV to S3
+            # Step 4: Upload CSV to S3
             original_filename = os.path.splitext(os.path.basename(s3_key))[0]
             csv_key = f"processed/{original_filename}.csv"
             
@@ -104,7 +100,7 @@ class Worker:
                 csv_url = self.s3_utils.upload_file(temp_csv.name, s3_bucket, csv_key)
                 logger.info(f"Uploaded CSV to S3: {csv_key}")
             
-            # Step 6: Send success webhook
+            # Step 5: Send success webhook
             self._send_webhook(webhook_url, {
                 "status": "success",
                 "csv_url": csv_url,

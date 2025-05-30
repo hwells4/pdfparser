@@ -18,7 +18,7 @@ class DoctlyClient:
     def __init__(self):
         """Initialize Doctly client with API key from environment"""
         self.api_key = os.getenv('DOCTLY_API_KEY')
-        self.base_url = "https://api.doctly.com/v1"  # Update with actual Doctly API URL
+        self.base_url = "https://api.doctly.ai/api/v1"  # Fixed: Updated to correct Doctly API URL
         self._api_key_validated = False
         
         logger.info("Doctly client initialized (API key will be validated on first use)")
@@ -30,8 +30,7 @@ class DoctlyClient:
                 raise Exception("DOCTLY_API_KEY environment variable is required")
             
             self.headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
+                "Authorization": f"Bearer {self.api_key}"
             }
             self._api_key_validated = True
             logger.info("Doctly API key validated")
@@ -60,22 +59,18 @@ class DoctlyClient:
             file_size = os.path.getsize(pdf_path)
             logger.info(f"Uploading PDF to Doctly: {pdf_path} ({file_size} bytes)")
             
-            # Prepare multipart form data
+            # Prepare multipart form data according to Doctly API docs
             with open(pdf_path, 'rb') as pdf_file:
                 files = {
-                    'file': (os.path.basename(pdf_path), pdf_file, 'application/pdf')
+                    'files': (os.path.basename(pdf_path), pdf_file, 'application/pdf')
                 }
-                data = {
-                    'accuracy': accuracy,
-                    'output_format': 'markdown'
-                }
-                
-                # Remove Content-Type header for multipart upload
-                upload_headers = {k: v for k, v in self.headers.items() if k != "Content-Type"}
+                data = {}
+                if accuracy:
+                    data['accuracy'] = accuracy
                 
                 response = requests.post(
-                    f"{self.base_url}/convert",
-                    headers=upload_headers,
+                    f"{self.base_url}/documents/",  # Fixed: Updated endpoint path
+                    headers=self.headers,
                     files=files,
                     data=data,
                     timeout=300  # 5 minute timeout for upload
@@ -84,9 +79,12 @@ class DoctlyClient:
                 response.raise_for_status()
                 result = response.json()
                 
-                job_id = result.get('job_id')
+                # The API might return different response structure
+                # We'll need to adapt based on actual response
+                job_id = result.get('id') or result.get('job_id') or result.get('document_id')
                 if not job_id:
-                    raise Exception("No job_id returned from Doctly API")
+                    logger.error(f"Unexpected response from Doctly: {result}")
+                    raise Exception("No job/document ID returned from Doctly API")
                 
                 logger.info(f"PDF uploaded successfully, job ID: {job_id}")
                 return job_id
@@ -115,7 +113,7 @@ class DoctlyClient:
         
         try:
             response = requests.get(
-                f"{self.base_url}/jobs/{job_id}",
+                f"{self.base_url}/documents/{job_id}",  # Fixed: Updated endpoint path
                 headers=self.headers,
                 timeout=30
             )
@@ -147,7 +145,7 @@ class DoctlyClient:
         
         try:
             response = requests.get(
-                f"{self.base_url}/jobs/{job_id}/download",
+                f"{self.base_url}/documents/{job_id}/download",  # Fixed: Updated endpoint path
                 headers=self.headers,
                 timeout=60
             )
@@ -250,4 +248,76 @@ class DoctlyClient:
             
         except Exception as e:
             logger.error(f"Failed to cancel Doctly job {job_id}: {str(e)}")
-            return False 
+            return False
+
+    def process_pdf_direct(self, pdf_path: str, accuracy: str = "ultra") -> str:
+        """
+        Process a PDF file and return the markdown content directly
+        This method handles the case where Doctly returns the result immediately
+        
+        Args:
+            pdf_path: Local path to the PDF file
+            accuracy: Processing accuracy level ("ultra", "high", "medium")
+            
+        Returns:
+            Markdown content as string
+            
+        Raises:
+            Exception: If processing fails
+        """
+        self._validate_api_key()
+        
+        try:
+            # Verify file exists
+            if not os.path.exists(pdf_path):
+                raise Exception(f"PDF file not found: {pdf_path}")
+            
+            file_size = os.path.getsize(pdf_path)
+            logger.info(f"Processing PDF with Doctly: {pdf_path} ({file_size} bytes)")
+            
+            # Prepare multipart form data according to Doctly API docs
+            with open(pdf_path, 'rb') as pdf_file:
+                files = {
+                    'files': (os.path.basename(pdf_path), pdf_file, 'application/pdf')
+                }
+                data = {}
+                if accuracy:
+                    data['accuracy'] = accuracy
+                
+                response = requests.post(
+                    f"{self.base_url}/documents/",
+                    headers=self.headers,
+                    files=files,
+                    data=data,
+                    timeout=300  # 5 minute timeout for processing
+                )
+                
+                response.raise_for_status()
+                
+                # Check if response is JSON (with job ID) or direct markdown
+                content_type = response.headers.get('content-type', '')
+                if 'application/json' in content_type:
+                    # Response contains job information, need to poll
+                    result = response.json()
+                    job_id = result.get('id') or result.get('job_id') or result.get('document_id')
+                    if job_id:
+                        logger.info(f"Got job ID {job_id}, polling for completion...")
+                        return self.poll_until_complete(job_id)
+                    else:
+                        logger.error(f"Unexpected JSON response from Doctly: {result}")
+                        raise Exception("No job ID returned from Doctly API")
+                else:
+                    # Direct markdown response
+                    markdown_content = response.text
+                    if not markdown_content.strip():
+                        raise Exception("Received empty markdown content from Doctly")
+                    
+                    logger.info(f"Received direct markdown content ({len(markdown_content)} characters)")
+                    return markdown_content
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"HTTP error processing PDF with Doctly: {str(e)}")
+            raise Exception(f"Doctly processing failed: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error processing PDF with Doctly: {str(e)}")
+            raise 
