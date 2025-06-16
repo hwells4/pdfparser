@@ -412,3 +412,64 @@ class DoctlyClient:
             
             # If all else fails, re-raise the original error
             raise e 
+
+    def upload_pdf_insurance(self, pdf_path: str, callback_url: str) -> str:
+        """
+        Upload a PDF file to Doctly Insurance extractor for async processing
+        
+        Args:
+            pdf_path: Local path to the PDF file
+            callback_url: Webhook URL for processing completion notification
+            
+        Returns:
+            Document ID for tracking the conversion process
+            
+        Raises:
+            Exception: If upload fails
+        """
+        self._validate_api_key()  # Validate API key before use
+        
+        try:
+            # Verify file exists
+            if not os.path.exists(pdf_path):
+                raise Exception(f"PDF file not found: {pdf_path}")
+            
+            file_size = os.path.getsize(pdf_path)
+            logger.info(f"Uploading PDF to Doctly Insurance extractor: {pdf_path} ({file_size} bytes)")
+            
+            # Prepare multipart form data for Insurance extractor API
+            with open(pdf_path, 'rb') as pdf_file:
+                files = {
+                    'file': (os.path.basename(pdf_path), pdf_file, 'application/pdf')  # Note: 'file' not 'files'
+                }
+                data = {
+                    'callback_url': callback_url
+                }
+                
+                response = requests.post(
+                    f"{self.base_url}/e/insurance",  # Different endpoint
+                    headers=self.headers,
+                    files=files,
+                    data=data,
+                    timeout=300  # 5 minute timeout for upload
+                )
+                
+                response.raise_for_status()
+                result = response.json()
+                
+                # Insurance extractor returns single document object
+                document_id = result.get('id')
+                if not document_id:
+                    logger.error(f"No ID in response: {result}")
+                    raise Exception("No document ID returned from Doctly Insurance API")
+                
+                logger.info(f"PDF uploaded to Insurance extractor successfully, document ID: {document_id}")
+                logger.info(f"Insurance extractor response: {result}")
+                return document_id
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"HTTP error uploading to Doctly Insurance extractor: {str(e)}")
+            raise Exception(f"Doctly Insurance extractor upload failed: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error uploading PDF to Doctly Insurance extractor: {str(e)}")
+            raise 
