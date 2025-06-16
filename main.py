@@ -186,14 +186,14 @@ async def parse_pdf(request: ParseRequest, api_key: str = Depends(verify_api_key
 @app.post("/parse-json", response_model=ParseResponse)
 async def parse_pdf_json(request: ParseRequest, api_key: str = Depends(verify_api_key)) -> ParseResponse:
     """
-    New endpoint to initiate PDF parsing using Doctly Insurance extractor
+    New endpoint for PDF parsing using Doctly Insurance extractor with internal polling
     
     Args:
         request: ParseRequest containing S3 bucket, key, and webhook URL
         api_key: Verified API key from X-API-Key header
         
     Returns:
-        ParseResponse with job status and Doctly document ID
+        ParseResponse with job status and success/error details
     """
     try:
         # Validate required environment variables
@@ -211,49 +211,69 @@ async def parse_pdf_json(request: ParseRequest, api_key: str = Depends(verify_ap
         from s3_utils import S3Utils
         from doctly_client import DoctlyClient
         import tempfile
-        import requests
+        import json
         
         s3_utils = S3Utils()
         doctly_client = DoctlyClient()
         
         logger.info(f"Processing parse-json request: {request.s3_key}")
         
-        # Step 1: Download PDF from S3
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temp_pdf:
-            temp_pdf_path = temp_pdf.name
-            
+        temp_files = []
+        document_id = None
+        
         try:
-            s3_utils.download_file(request.s3_bucket, request.s3_key, temp_pdf_path)
-            logger.info(f"Downloaded PDF from S3: {request.s3_key}")
+            # Step 1: Download PDF from S3
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temp_pdf:
+                temp_files.append(temp_pdf.name)
+                s3_utils.download_file(request.s3_bucket, request.s3_key, temp_pdf.name)
+                logger.info(f"Downloaded PDF from S3: {request.s3_key}")
             
-            # Step 2: Call Doctly Insurance extractor
-            # Get the callback URL for this service
-            callback_url = f"{os.getenv('RAILWAY_STATIC_URL', 'http://localhost:8000')}/doctly-webhook-handler"
+            # Step 2: Process with Doctly Insurance extractor (internal polling)
+            json_content, document_id = doctly_client.process_pdf_insurance_direct(temp_pdf.name)
+            logger.info(f"Doctly Insurance processing completed, document ID: {document_id}")
             
-            doctly_document_id = doctly_client.upload_pdf_insurance(temp_pdf_path, callback_url)
-            logger.info(f"Doctly Insurance extractor called, document ID: {doctly_document_id}")
+            # Step 3: Convert JSON to CSV
+            csv_content = await convert_json_to_csv(json_content)
+            logger.info("Converted JSON to CSV")
             
-            # Step 3: Store job mapping for webhook handling
-            doctly_jobs[doctly_document_id] = {
-                "s3_bucket": request.s3_bucket,
-                "s3_key": request.s3_key,
-                "webhook_url": request.webhook_url,
-                "document_id": request.document_id,
-                "original_filename": os.path.basename(request.s3_key),
-                "created_at": time.time()
-            }
+            # Step 4: Upload CSV to S3
+            original_filename = os.path.splitext(os.path.basename(request.s3_key))[0]
+            csv_key = f"processed/{original_filename}.csv"
             
-            logger.info(f"Stored job mapping for document ID: {doctly_document_id}")
+            with tempfile.NamedTemporaryFile(mode='w', suffix=".csv", delete=False) as temp_csv:
+                temp_files.append(temp_csv.name)
+                temp_csv.write(csv_content)
+                temp_csv.flush()
+                
+                csv_url = s3_utils.upload_file(temp_csv.name, request.s3_bucket, csv_key)
+                logger.info(f"Uploaded CSV to S3: {csv_key}")
             
-            return ParseResponse(status="processing", document_id=doctly_document_id)
+            # Step 5: Send success webhook with document_id
+            webhook_url_with_id = f"{request.webhook_url}?document_id={document_id}"
+            await send_success_webhook(webhook_url_with_id, csv_url, os.path.basename(request.s3_key))
+            
+            logger.info(f"Parse-json request completed successfully for {request.s3_key}")
+            
+            return ParseResponse(status="completed", document_id=document_id)
+            
+        except Exception as e:
+            logger.error(f"Parse-json request failed: {str(e)}")
+            
+            # Send error webhook with document_id if available
+            webhook_url_with_id = f"{request.webhook_url}?document_id={document_id}" if document_id else request.webhook_url
+            await send_error_webhook(webhook_url_with_id, str(e), os.path.basename(request.s3_key))
+            
+            raise HTTPException(status_code=500, detail=str(e))
             
         finally:
-            # Cleanup temp file
-            try:
-                if os.path.exists(temp_pdf_path):
-                    os.unlink(temp_pdf_path)
-            except Exception as e:
-                logger.warning(f"Failed to cleanup temp file {temp_pdf_path}: {str(e)}")
+            # Cleanup temporary files
+            for file_path in temp_files:
+                try:
+                    if os.path.exists(file_path):
+                        os.unlink(file_path)
+                        logger.debug(f"Cleaned up temp file: {file_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup temp file {file_path}: {str(e)}")
         
     except HTTPException:
         # Re-raise HTTPExceptions as-is
