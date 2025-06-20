@@ -68,8 +68,9 @@ class Worker:
         s3_bucket = job_data["s3_bucket"]
         s3_key = job_data["s3_key"]
         webhook_url = job_data["webhook_url"]
+        processing_type = job_data.get("processing_type", "markdown")  # Default to markdown processing
         
-        logger.info(f"Processing job {job['id']}: {s3_key}")
+        logger.info(f"Processing job {job['id']}: {s3_key} (type: {processing_type})")
         
         temp_files = []
         document_id = None
@@ -81,15 +82,25 @@ class Worker:
                 self.s3_utils.download_file(s3_bucket, s3_key, temp_pdf.name)
                 logger.info(f"Downloaded PDF from S3: {s3_key}")
             
-            # Step 2: Send to Doctly for conversion
-            markdown_content, document_id = self.doctly_client.process_pdf_direct(temp_pdf.name)
-            logger.info(f"Doctly processing completed, document ID: {document_id}")
+            # Step 2: Send to Doctly for conversion (different API based on processing type)
+            if processing_type == "json":
+                # Use Doctly Insurance extractor for JSON processing
+                json_content, document_id = self.doctly_client.process_pdf_insurance_direct(temp_pdf.name)
+                logger.info(f"Doctly Insurance processing completed, document ID: {document_id}")
+                
+                # Step 3: Convert JSON to CSV
+                csv_content = self._convert_json_to_csv(json_content)
+                logger.info("Converted JSON to CSV")
+            else:
+                # Use standard Doctly API for Markdown processing
+                markdown_content, document_id = self.doctly_client.process_pdf_direct(temp_pdf.name)
+                logger.info(f"Doctly processing completed, document ID: {document_id}")
+                
+                # Step 3: Parse Markdown to CSV
+                csv_content = self.table_parser.markdown_to_csv(markdown_content)
+                logger.info("Converted Markdown to CSV")
             
-            # Step 3: Parse Markdown to CSV
-            csv_content = self.table_parser.markdown_to_csv(markdown_content)
-            logger.info("Converted Markdown to CSV")
-            
-            # Step 4: Upload CSV to S3
+            # Step 4: Upload CSV to S3 (same for both processing types)
             original_filename = os.path.splitext(os.path.basename(s3_key))[0]
             csv_key = f"processed/{original_filename}.csv"
             
@@ -101,7 +112,7 @@ class Worker:
                 csv_url = self.s3_utils.upload_file(temp_csv.name, s3_bucket, csv_key)
                 logger.info(f"Uploaded CSV to S3: {csv_key}")
             
-            # Step 5: Send success webhook with document_id appended to URL
+            # Step 5: Send success webhook with document_id appended to URL (same for both processing types)
             webhook_url_with_id = f"{webhook_url}?document_id={document_id}"
             self._send_webhook(webhook_url_with_id, {
                 "status": "success",
@@ -143,6 +154,57 @@ class Worker:
             logger.info(f"Webhook sent successfully to {webhook_url}")
         except Exception as e:
             logger.error(f"Failed to send webhook to {webhook_url}: {str(e)}")
+    
+    def _convert_json_to_csv(self, json_content: str) -> str:
+        """
+        Convert JSON data to CSV format
+        
+        Args:
+            json_content: JSON content from Doctly Insurance extractor
+            
+        Returns:
+            CSV content as string
+        """
+        import pandas as pd
+        import json
+        from io import StringIO
+        
+        try:
+            # Parse JSON
+            data = json.loads(json_content)
+            
+            # Handle different JSON structures
+            if isinstance(data, dict):
+                # If it's a single object, convert to list
+                if 'data' in data and isinstance(data['data'], list):
+                    # Extract data array if present
+                    data = data['data']
+                elif any(isinstance(v, (list, dict)) for v in data.values()):
+                    # If it contains nested structures, flatten or handle appropriately
+                    df = pd.json_normalize(data)
+                else:
+                    # Simple key-value pairs
+                    df = pd.DataFrame([data])
+            elif isinstance(data, list):
+                # List of objects
+                if data and isinstance(data[0], dict):
+                    df = pd.json_normalize(data)
+                else:
+                    # Simple list
+                    df = pd.DataFrame(data, columns=['value'])
+            else:
+                # Primitive type
+                df = pd.DataFrame([{'value': data}])
+            
+            # Convert to CSV
+            csv_buffer = StringIO()
+            df.to_csv(csv_buffer, index=False)
+            return csv_buffer.getvalue()
+            
+        except Exception as e:
+            logger.error(f"Error converting JSON to CSV: {str(e)}")
+            logger.error(f"JSON content: {json_content[:500]}...")  # Log first 500 chars
+            raise Exception(f"Failed to convert JSON to CSV: {str(e)}")
     
     def _cleanup_temp_files(self, temp_files: list):
         """
